@@ -47,7 +47,6 @@ MSAL_SESSION_CACHE_KEY = "msal_token_cache_serialized"
 DEFAULT_RECEIPTS_DATABASE_DIR = (
     "General/Sales receipts database"
 )
-RECEIPTS_DATABASE_DIR = os.getenv("RECEIPTS_DATABASE_DIR", DEFAULT_RECEIPTS_DATABASE_DIR).strip()
 RECEIPTS_DATABASE_CSV = "sales_receipts_database.csv"
 PROVINCE_CODES = {
     "AB",
@@ -64,6 +63,15 @@ PROVINCE_CODES = {
     "SK",
     "YT",
 }
+
+
+def _get_config_value(key: str, default: str = "") -> str:
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key]).strip()
+    except Exception:
+        pass
+    return os.getenv(key, default).strip()
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -95,11 +103,11 @@ def _microsoft_auth_available() -> tuple[bool, str]:
     if msal is None:
         return False, "Missing dependency: msal"
 
-    tenant_id = os.getenv("TENANT_ID", "").strip()
-    client_id = os.getenv("CLIENT_ID", "").strip()
-    client_secret = os.getenv("CLIENT_SECRET", "").strip()
+    tenant_id = _get_config_value("TENANT_ID")
+    client_id = _get_config_value("CLIENT_ID")
+    client_secret = _get_config_value("CLIENT_SECRET")
     if not tenant_id or not client_id or not client_secret:
-        return False, "Missing TENANT_ID, CLIENT_ID or CLIENT_SECRET in environment"
+        return False, "Missing TENANT_ID, CLIENT_ID or CLIENT_SECRET in secrets/environment"
 
     return True, ""
 
@@ -118,7 +126,7 @@ def _save_msal_cache(cache) -> None:
 
 
 def _resolve_redirect_uri() -> str:
-    env_redirect = os.getenv("REDIRECT_URI", "").strip()
+    env_redirect = _get_config_value("REDIRECT_URI")
     host = ""
     try:
         host = str(st.context.headers.get("host", "")).strip()
@@ -144,11 +152,11 @@ def _resolve_redirect_uri() -> str:
 
 
 def _msal_confidential_app(cache):
-    tenant_id = os.getenv("TENANT_ID", "").strip()
-    client_id = os.getenv("CLIENT_ID", "").strip()
-    client_secret = os.getenv("CLIENT_SECRET", "").strip()
+    tenant_id = _get_config_value("TENANT_ID")
+    client_id = _get_config_value("CLIENT_ID")
+    client_secret = _get_config_value("CLIENT_SECRET")
     if not tenant_id or not client_id or not client_secret:
-        raise RuntimeError("Missing TENANT_ID / CLIENT_ID / CLIENT_SECRET in environment.")
+        raise RuntimeError("Missing TENANT_ID / CLIENT_ID / CLIENT_SECRET in secrets/environment.")
 
     authority = f"https://login.microsoftonline.com/{tenant_id}"
     return msal.ConfidentialClientApplication(
@@ -234,7 +242,7 @@ def build_suggested_file_name(payment_date: str, bank: str, card_type: str, merc
 
 
 def _database_dir() -> str:
-    return RECEIPTS_DATABASE_DIR
+    return _get_config_value("RECEIPTS_DATABASE_DIR", DEFAULT_RECEIPTS_DATABASE_DIR)
 
 
 def _database_csv_path() -> str:
@@ -313,11 +321,11 @@ def graph_put_bytes(url: str, token: str, content: bytes) -> dict[str, Any]:
 
 
 def resolve_drive_id(token: str) -> str:
-    sp_hostname = os.getenv("SP_HOSTNAME", "").strip()
-    sp_site_path = os.getenv("SP_SITE_PATH", "").strip()
-    sp_drive_name = os.getenv("SP_DRIVE_NAME", "Documents").strip()
+    sp_hostname = _get_config_value("SP_HOSTNAME")
+    sp_site_path = _get_config_value("SP_SITE_PATH")
+    sp_drive_name = _get_config_value("SP_DRIVE_NAME", "Documents")
     if not sp_hostname or not sp_site_path:
-        raise RuntimeError("Missing SP_HOSTNAME / SP_SITE_PATH in environment.")
+        raise RuntimeError("Missing SP_HOSTNAME / SP_SITE_PATH in secrets/environment.")
 
     site = graph_get(f"https://graph.microsoft.com/v1.0/sites/{sp_hostname}:{sp_site_path}", token)
     drives = graph_get(f"https://graph.microsoft.com/v1.0/sites/{site['id']}/drives", token).get("value", [])
@@ -589,9 +597,9 @@ def classify_with_gpt(
     compact_receipt: dict[str, Any],
     use_location_enrichment: bool = True,
 ) -> dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = _get_config_value("OPENAI_API_KEY")
     if not api_key:
-        return fallback_gpt("OPENAI_API_KEY is missing")
+        return fallback_gpt("OPENAI_API_KEY is missing in secrets/environment")
 
     client = OpenAI(api_key=api_key)
     enrich_rule = (
