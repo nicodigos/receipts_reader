@@ -1,0 +1,8 @@
+streamlit
+pandas
+openpyxl
+python-dotenv
+requests
+pymupdf
+openai
+msal
