@@ -6,3 +6,4 @@ requests
 pymupdf
 openai
 msal
+google-cloud-vision
