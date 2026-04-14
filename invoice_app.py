@@ -117,10 +117,6 @@ def _normalize_card_last4_series(series: pd.Series) -> pd.Series:
     return series.map(_normalize_card_last4).astype("string")
 
 
-def _display_card_last4_series(series: pd.Series) -> pd.Series:
-    return series.map(_display_card_last4).fillna("").astype(object)
-
-
 def _microsoft_auth_available() -> tuple[bool, str]:
     if msal is None:
         return False, "Missing dependency: msal"
@@ -751,8 +747,6 @@ def _format_column_label(column_name: str) -> str:
 
 def _prettify_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     renamed_df = df.copy()
-    if "card_last4" in renamed_df.columns:
-        renamed_df["card_last4"] = _display_card_last4_series(renamed_df["card_last4"])
     renamed_df.columns = [_format_column_label(column) for column in renamed_df.columns]
     return renamed_df
 
@@ -822,11 +816,7 @@ def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str
                 continue
             raw_values = [str(v) for v in filtered_df[column].dropna().astype(str).unique() if str(v).strip()]
             if column == "card_last4":
-                option_map = {}
-                for normalized in raw_values:
-                    display = _display_card_last4(normalized)
-                    if display:
-                        option_map[display] = normalized
+                option_map = {normalized: normalized for normalized in raw_values}
                 options = sorted(option_map)
             else:
                 option_map = {}
