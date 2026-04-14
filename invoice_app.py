@@ -99,6 +99,24 @@ def _sanitize_filename_component(value: str, fallback: str) -> str:
     return text or fallback
 
 
+def _normalize_card_last4(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if text.startswith("N"):
+        text = text[1:]
+    if not re.fullmatch(r"\d{4}", text):
+        return ""
+    return f"N{text}"
+
+
+def _display_card_last4(value: Any) -> str:
+    normalized = _normalize_card_last4(value)
+    return normalized[1:] if normalized else ""
+
+
+def _normalize_card_last4_series(series: pd.Series) -> pd.Series:
+    return series.map(_normalize_card_last4).astype("string")
+
+
 def _microsoft_auth_available() -> tuple[bool, str]:
     if msal is None:
         return False, "Missing dependency: msal"
@@ -375,7 +393,10 @@ def load_database_df(token: str, drive_id: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     try:
-        return pd.read_csv(BytesIO(content))
+        df = pd.read_csv(BytesIO(content), dtype={"card_last4": "string"})
+        if "card_last4" in df.columns:
+            df["card_last4"] = _normalize_card_last4_series(df["card_last4"])
+        return df
     except Exception as exc:
         logger.exception("Could not read database CSV")
         st.error(f"Could not read database CSV: {exc}")
@@ -386,6 +407,8 @@ def append_rows_to_database(rows_df: pd.DataFrame, token: str, drive_id: str) ->
     csv_path = _database_csv_path()
     existing_df = load_database_df(token, drive_id)
     combined_df = pd.concat([existing_df, rows_df], ignore_index=True) if not existing_df.empty else rows_df.copy()
+    if "card_last4" in combined_df.columns:
+        combined_df["card_last4"] = _normalize_card_last4_series(combined_df["card_last4"])
     buffer = BytesIO()
     combined_df.to_csv(buffer, index=False, encoding="utf-8-sig")
     upload_sharepoint_file_bytes(csv_path, buffer.getvalue(), token, drive_id=drive_id)
@@ -624,10 +647,14 @@ def classify_with_gpt(
         "city",
         "province",
     ]
+    today = datetime.now()
+    current_year = today.year
+    previous_year = current_year - 1
     user_prompt = (
         "Esto viene de un invoice. Quiero que llenes estos campos: "
         f"{', '.join(required_fields)}. "
-        f"{enrich_rule} Prefer OCR evidence. If uncertain category use other and lower confidence. Notes <=20 words.\n"
+        f"{enrich_rule} Prefer OCR evidence. If uncertain category use other and lower confidence. Notes <=20 words. "
+        f"For payment_date, the invoice year is very likely {current_year}; depending on how close the receipt is to the start of the year, it may be {previous_year} instead.\n"
         f"Google Vision OCR JSON:\n{json.dumps(vision_payload, ensure_ascii=False)}\n\n"
         f"Parsed helper fields:\n{json.dumps(compact_receipt, ensure_ascii=False)}"
     )
@@ -720,6 +747,8 @@ def _format_column_label(column_name: str) -> str:
 
 def _prettify_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     renamed_df = df.copy()
+    if "card_last4" in renamed_df.columns:
+        renamed_df["card_last4"] = renamed_df["card_last4"].map(_display_card_last4)
     renamed_df.columns = [_format_column_label(column) for column in renamed_df.columns]
     return renamed_df
 
@@ -785,14 +814,24 @@ def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str
         for column in filter_columns:
             if column not in filtered_df.columns:
                 continue
-            options = sorted([str(v) for v in filtered_df[column].dropna().astype(str).unique() if str(v).strip()])
+            raw_values = [str(v) for v in filtered_df[column].dropna().astype(str).unique() if str(v).strip()]
+            if column == "card_last4":
+                option_map = {display: normalized for normalized in raw_values if (display := _display_card_last4(normalized))}
+                options = sorted(option_map)
+            else:
+                option_map = {}
+                options = sorted(raw_values)
             selected = st.multiselect(
                 f"Filter by {_format_column_label(column)}",
                 options=options,
                 key=f"{section_key}_filter_{column}",
             )
             if selected:
-                filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+                if column == "card_last4":
+                    selected_values = [option_map[value] for value in selected if value in option_map]
+                    filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected_values)]
+                else:
+                    filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
 
         text_query = st.text_input("Search in table", key=f"{section_key}_text_query")
         if text_query.strip():
@@ -923,6 +962,12 @@ def initialize_session_state() -> None:
         st.session_state.gcv_errors = []
         st.session_state.last_database_csv_path = ""
         st.session_state.gcv_pending_uploads = []
+    st.session_state.setdefault("gcv_upload_signature", "")
+    st.session_state.setdefault("gcv_upload_pdf", None)
+    st.session_state.setdefault("gcv_company_name", COMPANY_OPTIONS[0])
+    st.session_state.setdefault("gcv_bank_name", BANK_OPTIONS[0])
+    st.session_state.setdefault("gcv_card_type", "debit")
+    st.session_state.setdefault("gcv_card_last4", "")
 
 
 def clear_processed_results() -> None:
@@ -934,6 +979,13 @@ def clear_processed_results() -> None:
     st.session_state.gcv_errors = []
     st.session_state.last_database_csv_path = ""
     st.session_state.gcv_pending_uploads = []
+
+
+def reset_upload_form() -> None:
+    st.session_state.gcv_company_name = COMPANY_OPTIONS[0]
+    st.session_state.gcv_bank_name = BANK_OPTIONS[0]
+    st.session_state.gcv_card_type = "debit"
+    st.session_state.gcv_card_last4 = ""
 
 
 def resolve_streamlit_token() -> tuple[str | None, bool, str]:
@@ -1008,11 +1060,21 @@ def render_page_header(page_title: str) -> tuple[str | None, bool, str]:
 
 
 def render_process_page(token: str | None) -> None:
-    uploaded_pdf = st.file_uploader("Upload PDF (one invoice per page)", type=["pdf"])
-    company_name = st.selectbox("Company *", options=COMPANY_OPTIONS, index=0)
-    bank_name = st.selectbox("Bank *", options=BANK_OPTIONS, index=0)
-    card_type = st.selectbox("Card type *", options=["debit", "credit"], index=0)
-    card_last4 = st.text_input("Card last 4 digits *", max_chars=4)
+    uploaded_pdf = st.file_uploader("Upload PDF (one invoice per page)", type=["pdf"], key="gcv_upload_pdf")
+    current_upload_signature = ""
+    if uploaded_pdf is not None:
+        current_upload_signature = f"{uploaded_pdf.name}:{uploaded_pdf.size}"
+    previous_upload_signature = str(st.session_state.get("gcv_upload_signature", ""))
+    if current_upload_signature != previous_upload_signature:
+        clear_processed_results()
+        reset_upload_form()
+        st.session_state.gcv_upload_signature = current_upload_signature
+        st.rerun()
+
+    company_name = st.selectbox("Company *", options=COMPANY_OPTIONS, index=0, key="gcv_company_name")
+    bank_name = st.selectbox("Bank *", options=BANK_OPTIONS, index=0, key="gcv_bank_name")
+    card_type = st.selectbox("Card type *", options=["debit", "credit"], index=0, key="gcv_card_type")
+    card_last4 = st.text_input("Card last 4 digits *", max_chars=4, key="gcv_card_last4")
     process_clicked = st.button("Process", type="primary")
 
     if process_clicked:
@@ -1022,8 +1084,8 @@ def render_process_page(token: str | None) -> None:
         if not uploaded_pdf:
             st.error("Please upload a PDF file.")
             st.stop()
-        card_last4 = str(card_last4 or "").strip()
-        if not re.fullmatch(r"\d{4}", card_last4):
+        card_last4 = _normalize_card_last4(card_last4)
+        if not card_last4:
             st.error("Card last 4 digits must be exactly 4 numbers.")
             st.stop()
         pdf_bytes = uploaded_pdf.read()
