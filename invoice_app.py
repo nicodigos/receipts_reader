@@ -83,6 +83,13 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"true", "1", "yes", "y", "si", "sí"}
+
+
 def _safe_json(data: Any) -> str:
     try:
         return json.dumps(data, ensure_ascii=False)
@@ -297,6 +304,7 @@ def build_database_row(
     pdf_file_path: str,
 ) -> dict[str, Any]:
     return {
+        "checked": False,
         "processed_at": datetime.now().isoformat(timespec="seconds"),
         "source_page_number": int(page_number),
         "company": company,
@@ -394,6 +402,9 @@ def load_database_df(token: str, drive_id: str) -> pd.DataFrame:
         return pd.DataFrame()
     try:
         df = pd.read_csv(BytesIO(content), dtype={"card_last4": "string"})
+        if "checked" not in df.columns:
+            df["checked"] = False
+        df["checked"] = df["checked"].map(_to_bool)
         if "card_last4" in df.columns:
             df["card_last4"] = _normalize_card_last4_series(df["card_last4"])
         return df
@@ -407,10 +418,27 @@ def append_rows_to_database(rows_df: pd.DataFrame, token: str, drive_id: str) ->
     csv_path = _database_csv_path()
     existing_df = load_database_df(token, drive_id)
     combined_df = pd.concat([existing_df, rows_df], ignore_index=True) if not existing_df.empty else rows_df.copy()
+    if "checked" not in combined_df.columns:
+        combined_df["checked"] = False
+    combined_df["checked"] = combined_df["checked"].map(_to_bool)
     if "card_last4" in combined_df.columns:
         combined_df["card_last4"] = _normalize_card_last4_series(combined_df["card_last4"])
     buffer = BytesIO()
     combined_df.to_csv(buffer, index=False, encoding="utf-8-sig")
+    upload_sharepoint_file_bytes(csv_path, buffer.getvalue(), token, drive_id=drive_id)
+    return csv_path
+
+
+def save_database_df(database_df: pd.DataFrame, token: str, drive_id: str) -> str:
+    csv_path = _database_csv_path()
+    export_df = database_df.copy()
+    if "checked" not in export_df.columns:
+        export_df["checked"] = False
+    export_df["checked"] = export_df["checked"].map(_to_bool)
+    if "card_last4" in export_df.columns:
+        export_df["card_last4"] = _normalize_card_last4_series(export_df["card_last4"])
+    buffer = BytesIO()
+    export_df.to_csv(buffer, index=False, encoding="utf-8-sig")
     upload_sharepoint_file_bytes(csv_path, buffer.getvalue(), token, drive_id=drive_id)
     return csv_path
 
@@ -751,121 +779,196 @@ def _prettify_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     return renamed_df
 
 
-def _apply_date_range_filter(filtered_df: pd.DataFrame, column: str, label: str, key: str) -> pd.DataFrame:
-    if column not in filtered_df.columns:
-        return filtered_df
+def _get_date_filter_value(base_df: pd.DataFrame, column: str, label: str, key: str) -> tuple[Any, Any] | None:
+    if column not in base_df.columns:
+        return None
 
-    parsed_dates = pd.to_datetime(filtered_df[column], errors="coerce")
+    parsed_dates = pd.to_datetime(base_df[column], errors="coerce")
     valid_dates = parsed_dates.dropna()
     if valid_dates.empty:
-        return filtered_df
+        return None
 
     min_date = valid_dates.min().date()
     max_date = valid_dates.max().date()
-    selected_range = st.date_input(label, value=(min_date, max_date), min_value=min_date, max_value=max_date, key=key)
-    if isinstance(selected_range, tuple) and len(selected_range) == 2:
-        start_date, end_date = selected_range
-        mask = parsed_dates.dt.date.between(start_date, end_date, inclusive="both")
-        return filtered_df[mask.fillna(False)]
-    return filtered_df
+    existing_value = st.session_state.get(key)
+    if isinstance(existing_value, tuple) and len(existing_value) == 2:
+        start_value = min(max(existing_value[0], min_date), max_date)
+        end_value = min(max(existing_value[1], min_date), max_date)
+        st.session_state[key] = (min(start_value, end_value), max(start_value, end_value))
+    else:
+        st.session_state[key] = (min_date, max_date)
+    return st.date_input(label, min_value=min_date, max_value=max_date, key=key)
 
 
-def _apply_numeric_slider_filter(filtered_df: pd.DataFrame, column: str, label: str, key: str) -> pd.DataFrame:
-    if column not in filtered_df.columns:
-        return filtered_df
+def _get_numeric_filter_value(base_df: pd.DataFrame, column: str, label: str, key: str) -> tuple[float, float] | None:
+    if column not in base_df.columns:
+        return None
 
-    numeric_series = pd.to_numeric(filtered_df[column], errors="coerce")
+    numeric_series = pd.to_numeric(base_df[column], errors="coerce")
     valid_values = numeric_series.dropna()
     if valid_values.empty:
-        return filtered_df
+        return None
 
     min_value = float(valid_values.min())
     max_value = float(valid_values.max())
     if min_value == max_value:
-        return filtered_df
+        return None
 
-    selected_min, selected_max = st.slider(
-        label,
-        min_value=min_value,
-        max_value=max_value,
-        value=(min_value, max_value),
-        key=key,
-    )
-    mask = numeric_series.between(selected_min, selected_max, inclusive="both")
-    return filtered_df[mask.fillna(False)]
+    existing_value = st.session_state.get(key)
+    if isinstance(existing_value, tuple) and len(existing_value) == 2:
+        low_value = min(max(float(existing_value[0]), min_value), max_value)
+        high_value = min(max(float(existing_value[1]), min_value), max_value)
+        st.session_state[key] = (min(low_value, high_value), max(low_value, high_value))
+    else:
+        st.session_state[key] = (min_value, max_value)
+    return st.slider(label, min_value=min_value, max_value=max_value, key=key)
+
+
+def _clear_database_filters(section_key: str) -> None:
+    prefixes = [
+        f"{section_key}_filter_",
+        f"{section_key}_text_query",
+        f"{section_key}_receipts_editor",
+    ]
+    for key in list(st.session_state.keys()):
+        if any(key.startswith(prefix) for prefix in prefixes):
+            st.session_state.pop(key, None)
 
 
 def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str, section_key: str = "database") -> None:
-    filter_columns = [
-        "company",
-        "bank",
-        "card_type",
-        "card_last4",
-        "gpt_category",
-        "gpt_merchant_name",
-        "gpt_city",
-        "gpt_province",
-    ]
-    filtered_df = database_df.copy()
+    if "checked" not in database_df.columns:
+        database_df = database_df.copy()
+        database_df["checked"] = False
+    database_df = database_df.copy()
+    database_df["checked"] = database_df["checked"].map(_to_bool)
+    filter_columns = ["company", "bank", "card_type", "card_last4", "gpt_category", "gpt_merchant_name", "gpt_city", "gpt_province"]
+
     with st.sidebar:
         st.header("Filters")
+        if st.button("Clear filters", key=f"{section_key}_clear_filters", use_container_width=True):
+            _clear_database_filters(section_key)
+            st.rerun()
+
+        checked_filter = st.selectbox(
+            "Checked status",
+            options=["all", "unchecked", "checked"],
+            key=f"{section_key}_filter_checked_status",
+        )
+
+        selected_filters: dict[str, list[str]] = {}
         for column in filter_columns:
-            if column not in filtered_df.columns:
+            if column not in database_df.columns:
                 continue
-            raw_values = [str(v) for v in filtered_df[column].dropna().astype(str).unique() if str(v).strip()]
+            raw_values = [str(v) for v in database_df[column].dropna().astype(str).unique() if str(v).strip()]
             options = sorted(raw_values)
-            selected = st.multiselect(
+            selected_filters[column] = st.multiselect(
                 f"Filter by {_format_column_label(column)}",
                 options=options,
                 key=f"{section_key}_filter_{column}",
             )
-            if selected:
-                filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
 
         text_query = st.text_input("Search in table", key=f"{section_key}_text_query")
-        if text_query.strip():
-            query = text_query.strip().lower()
-            row_mask = filtered_df.astype(str).apply(
-                lambda row: row.str.lower().str.contains(query, na=False).any(),
-                axis=1,
-            )
-            filtered_df = filtered_df[row_mask]
-
-        filtered_df = _apply_date_range_filter(
-            filtered_df,
-            column="processed_at",
-            label="Processed At",
-            key=f"{section_key}_filter_processed_at",
+        processed_at_range = _get_date_filter_value(
+            database_df, "processed_at", "Processed At", f"{section_key}_filter_processed_at"
         )
-        filtered_df = _apply_date_range_filter(
-            filtered_df,
-            column="gpt_payment_date",
-            label="Payment Date",
-            key=f"{section_key}_filter_gpt_payment_date",
+        payment_date_range = _get_date_filter_value(
+            database_df, "gpt_payment_date", "Payment Date", f"{section_key}_filter_gpt_payment_date"
         )
-        filtered_df = _apply_numeric_slider_filter(
-            filtered_df,
-            column="gpt_total_amount",
-            label="Amount",
-            key=f"{section_key}_filter_gpt_total_amount",
+        amount_range = _get_numeric_filter_value(
+            database_df, "gpt_total_amount", "Amount", f"{section_key}_filter_gpt_total_amount"
         )
-        filtered_df = _apply_numeric_slider_filter(
-            filtered_df,
-            column="gpt_taxes_total",
-            label="Taxes Total",
-            key=f"{section_key}_filter_gpt_taxes_total",
+        taxes_range = _get_numeric_filter_value(
+            database_df, "gpt_taxes_total", "Taxes Total", f"{section_key}_filter_gpt_taxes_total"
         )
-        filtered_df = _apply_numeric_slider_filter(
-            filtered_df,
-            column="gpt_confidence",
-            label="Confidence",
-            key=f"{section_key}_filter_gpt_confidence",
+        confidence_range = _get_numeric_filter_value(
+            database_df, "gpt_confidence", "Confidence", f"{section_key}_filter_gpt_confidence"
         )
 
-    display_df = _prettify_dataframe_columns(filtered_df)
+    filtered_df = database_df.copy()
+    if checked_filter == "checked":
+        filtered_df = filtered_df[filtered_df["checked"]]
+    elif checked_filter == "unchecked":
+        filtered_df = filtered_df[~filtered_df["checked"]]
+
+    for column, selected in selected_filters.items():
+        if selected:
+            filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+
+    if text_query.strip():
+        query = text_query.strip().lower()
+        row_mask = filtered_df.astype(str).apply(
+            lambda row: row.str.lower().str.contains(query, na=False).any(),
+            axis=1,
+        )
+        filtered_df = filtered_df[row_mask]
+
+    if processed_at_range and isinstance(processed_at_range, tuple) and len(processed_at_range) == 2:
+        parsed_dates = pd.to_datetime(filtered_df["processed_at"], errors="coerce")
+        full_dates = pd.to_datetime(database_df["processed_at"], errors="coerce").dropna()
+        full_range = (full_dates.min().date(), full_dates.max().date()) if not full_dates.empty else None
+        if full_range and processed_at_range != full_range:
+            start_date, end_date = processed_at_range
+            filtered_df = filtered_df[parsed_dates.dt.date.between(start_date, end_date, inclusive="both").fillna(False)]
+
+    if payment_date_range and isinstance(payment_date_range, tuple) and len(payment_date_range) == 2:
+        parsed_dates = pd.to_datetime(filtered_df["gpt_payment_date"], errors="coerce")
+        full_dates = pd.to_datetime(database_df["gpt_payment_date"], errors="coerce").dropna()
+        full_range = (full_dates.min().date(), full_dates.max().date()) if not full_dates.empty else None
+        if full_range and payment_date_range != full_range:
+            start_date, end_date = payment_date_range
+            filtered_df = filtered_df[parsed_dates.dt.date.between(start_date, end_date, inclusive="both").fillna(False)]
+
+    if amount_range and isinstance(amount_range, tuple) and len(amount_range) == 2:
+        numeric_series = pd.to_numeric(filtered_df["gpt_total_amount"], errors="coerce")
+        full_series = pd.to_numeric(database_df["gpt_total_amount"], errors="coerce").dropna()
+        full_range = (float(full_series.min()), float(full_series.max())) if not full_series.empty else None
+        if full_range and amount_range != full_range:
+            filtered_df = filtered_df[numeric_series.between(amount_range[0], amount_range[1], inclusive="both").fillna(False)]
+
+    if taxes_range and isinstance(taxes_range, tuple) and len(taxes_range) == 2:
+        numeric_series = pd.to_numeric(filtered_df["gpt_taxes_total"], errors="coerce")
+        full_series = pd.to_numeric(database_df["gpt_taxes_total"], errors="coerce").dropna()
+        full_range = (float(full_series.min()), float(full_series.max())) if not full_series.empty else None
+        if full_range and taxes_range != full_range:
+            filtered_df = filtered_df[numeric_series.between(taxes_range[0], taxes_range[1], inclusive="both").fillna(False)]
+
+    if confidence_range and isinstance(confidence_range, tuple) and len(confidence_range) == 2:
+        numeric_series = pd.to_numeric(filtered_df["gpt_confidence"], errors="coerce")
+        full_series = pd.to_numeric(database_df["gpt_confidence"], errors="coerce").dropna()
+        full_range = (float(full_series.min()), float(full_series.max())) if not full_series.empty else None
+        if full_range and confidence_range != full_range:
+            filtered_df = filtered_df[numeric_series.between(confidence_range[0], confidence_range[1], inclusive="both").fillna(False)]
+
+    editable_df = filtered_df.copy()
+    editable_df["checked"] = editable_df["checked"].map(_to_bool)
+    ordered_columns = ["checked"] + [column for column in editable_df.columns if column != "checked"]
+    editable_df = editable_df.reindex(columns=ordered_columns)
+    display_df = _prettify_dataframe_columns(editable_df)
     st.subheader("Filtered Receipts")
-    st.caption(f"Rows: {len(display_df)}")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.caption(f"Showing {len(display_df)} of {len(database_df)} receipts")
+    edited_display_df = st.data_editor(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[column for column in display_df.columns if column != "Checked"],
+        column_config={"Checked": st.column_config.CheckboxColumn("Checked", help="Mark processed receipts.")},
+        key=f"{section_key}_receipts_editor",
+    )
+
+    save_col1, save_col2 = st.columns([1, 3])
+    with save_col1:
+        if st.button("Save checks", key=f"{section_key}_save_checks", use_container_width=True):
+            checked_column = "Checked"
+            updated_checks = edited_display_df[checked_column].fillna(False).astype(bool).tolist()
+            updated_df = database_df.copy()
+            updated_df.loc[filtered_df.index, "checked"] = updated_checks
+            try:
+                csv_path = save_database_df(updated_df, token, drive_id)
+                st.success(f"Checks saved to {csv_path}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save checks: {exc}")
+                logger.exception("Could not save checked flags")
 
     pdf_paths = filtered_df["file_path"].dropna().astype(str).tolist() if "file_path" in filtered_df.columns else []
     current_signature = "||".join(pdf_paths)
