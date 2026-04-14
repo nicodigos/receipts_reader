@@ -807,31 +807,20 @@ def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str
         "gpt_province",
     ]
     filtered_df = database_df.copy()
-    if "card_last4" in filtered_df.columns:
-        filtered_df["card_last4"] = _normalize_card_last4_series(filtered_df["card_last4"])
     with st.sidebar:
         st.header("Filters")
         for column in filter_columns:
             if column not in filtered_df.columns:
                 continue
             raw_values = [str(v) for v in filtered_df[column].dropna().astype(str).unique() if str(v).strip()]
-            if column == "card_last4":
-                option_map = {normalized: normalized for normalized in raw_values}
-                options = sorted(option_map)
-            else:
-                option_map = {}
-                options = sorted(raw_values)
+            options = sorted(raw_values)
             selected = st.multiselect(
                 f"Filter by {_format_column_label(column)}",
                 options=options,
                 key=f"{section_key}_filter_{column}",
             )
             if selected:
-                if column == "card_last4":
-                    selected_values = [option_map[value] for value in selected if value in option_map]
-                    filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected_values)]
-                else:
-                    filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
+                filtered_df = filtered_df[filtered_df[column].astype(str).isin(selected)]
 
         text_query = st.text_input("Search in table", key=f"{section_key}_text_query")
         if text_query.strip():
@@ -876,12 +865,7 @@ def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str
     display_df = _prettify_dataframe_columns(filtered_df)
     st.subheader("Filtered Receipts")
     st.caption(f"Rows: {len(display_df)}")
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"Card Last4": st.column_config.TextColumn("Card Last4")},
-    )
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     pdf_paths = filtered_df["file_path"].dropna().astype(str).tolist() if "file_path" in filtered_df.columns else []
     current_signature = "||".join(pdf_paths)
@@ -962,7 +946,6 @@ def initialize_session_state() -> None:
         st.session_state.gcv_processed = False
         st.session_state.gcv_results_saved = False
         st.session_state.gcv_summary_df = pd.DataFrame()
-        st.session_state.gcv_summary_preview_df = pd.DataFrame()
         st.session_state.gcv_raw_df = pd.DataFrame()
         st.session_state.gcv_excel_bytes = b""
         st.session_state.gcv_errors = []
@@ -974,14 +957,12 @@ def initialize_session_state() -> None:
     st.session_state.setdefault("gcv_bank_name", BANK_OPTIONS[0])
     st.session_state.setdefault("gcv_card_type", "debit")
     st.session_state.setdefault("gcv_card_last4", "")
-    st.session_state.setdefault("gcv_summary_preview_df", pd.DataFrame())
 
 
 def clear_processed_results() -> None:
     st.session_state.gcv_processed = False
     st.session_state.gcv_results_saved = False
     st.session_state.gcv_summary_df = pd.DataFrame()
-    st.session_state.gcv_summary_preview_df = pd.DataFrame()
     st.session_state.gcv_raw_df = pd.DataFrame()
     st.session_state.gcv_excel_bytes = b""
     st.session_state.gcv_errors = []
@@ -1258,8 +1239,6 @@ def render_process_page(token: str | None) -> None:
         summary_df = database_df.reindex(columns=ordered_cols)
 
         st.session_state.gcv_summary_df = summary_df
-        preview_df = _prettify_dataframe_columns(summary_df)
-        st.session_state.gcv_summary_preview_df = preview_df
         st.session_state.gcv_raw_df = raw_df
         st.session_state.gcv_excel_bytes = create_excel_bytes(summary_df, raw_df)
         st.session_state.gcv_errors = errors
@@ -1270,12 +1249,7 @@ def render_process_page(token: str | None) -> None:
 
     if st.session_state.gcv_processed:
         st.subheader("Summary Preview")
-        st.dataframe(
-            st.session_state.gcv_summary_preview_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={"Card Last4": st.column_config.TextColumn("Card Last4")},
-        )
+        st.dataframe(st.session_state.gcv_summary_df, use_container_width=True)
         if st.session_state.gcv_results_saved and st.session_state.last_database_csv_path:
             st.caption(f"CSV updated: {st.session_state.last_database_csv_path}")
         elif not st.session_state.gcv_results_saved:
