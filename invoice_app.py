@@ -298,6 +298,7 @@ def build_database_row(
     bank: str,
     card_type: str,
     card_last4: str,
+    description: str,
     gpt_json: dict[str, Any],
     notes: str,
     pdf_file_name: str,
@@ -318,6 +319,7 @@ def build_database_row(
         "gpt_merchant_name": str(gpt_json.get("merchant_name") or "").strip(),
         "gpt_city": str(gpt_json.get("city") or "").strip(),
         "gpt_province": str(gpt_json.get("province") or "").strip(),
+        "gpt_description": str(description or "").strip(),
         "gpt_confidence": _to_float(gpt_json.get("confidence"), 0.0),
         "notes": notes,
         "file_name": pdf_file_name,
@@ -404,9 +406,12 @@ def load_database_df(token: str, drive_id: str) -> pd.DataFrame:
         df = pd.read_csv(BytesIO(content), dtype={"card_last4": "string"})
         if "checked" not in df.columns:
             df["checked"] = False
+        if "gpt_description" not in df.columns:
+            df["gpt_description"] = ""
         df["checked"] = df["checked"].map(_to_bool)
         if "card_last4" in df.columns:
             df["card_last4"] = _normalize_card_last4_series(df["card_last4"])
+        df["gpt_description"] = df["gpt_description"].fillna("").astype(str).str.strip()
         return df
     except Exception as exc:
         logger.exception("Could not read database CSV")
@@ -420,9 +425,12 @@ def append_rows_to_database(rows_df: pd.DataFrame, token: str, drive_id: str) ->
     combined_df = pd.concat([existing_df, rows_df], ignore_index=True) if not existing_df.empty else rows_df.copy()
     if "checked" not in combined_df.columns:
         combined_df["checked"] = False
+    if "gpt_description" not in combined_df.columns:
+        combined_df["gpt_description"] = ""
     combined_df["checked"] = combined_df["checked"].map(_to_bool)
     if "card_last4" in combined_df.columns:
         combined_df["card_last4"] = _normalize_card_last4_series(combined_df["card_last4"])
+    combined_df["gpt_description"] = combined_df["gpt_description"].fillna("").astype(str).str.strip()
     buffer = BytesIO()
     combined_df.to_csv(buffer, index=False, encoding="utf-8-sig")
     upload_sharepoint_file_bytes(csv_path, buffer.getvalue(), token, drive_id=drive_id)
@@ -434,9 +442,12 @@ def save_database_df(database_df: pd.DataFrame, token: str, drive_id: str) -> st
     export_df = database_df.copy()
     if "checked" not in export_df.columns:
         export_df["checked"] = False
+    if "gpt_description" not in export_df.columns:
+        export_df["gpt_description"] = ""
     export_df["checked"] = export_df["checked"].map(_to_bool)
     if "card_last4" in export_df.columns:
         export_df["card_last4"] = _normalize_card_last4_series(export_df["card_last4"])
+    export_df["gpt_description"] = export_df["gpt_description"].fillna("").astype(str).str.strip()
     buffer = BytesIO()
     export_df.to_csv(buffer, index=False, encoding="utf-8-sig")
     upload_sharepoint_file_bytes(csv_path, buffer.getvalue(), token, drive_id=drive_id)
@@ -770,6 +781,8 @@ def _format_column_label(column_name: str) -> str:
     text = str(column_name or "").strip()
     if text.startswith("gpt_"):
         text = text[4:]
+    if text == "description":
+        return "Description"
     return text.replace("_", " ").title()
 
 
@@ -950,8 +963,11 @@ def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str
         display_df,
         use_container_width=True,
         hide_index=True,
-        disabled=[column for column in display_df.columns if column != "Checked"],
-        column_config={"Checked": st.column_config.CheckboxColumn("Checked", help="Mark processed receipts.")},
+        disabled=[column for column in display_df.columns if column not in {"Checked", "Description"}],
+        column_config={
+            "Checked": st.column_config.CheckboxColumn("Checked", help="Mark processed receipts."),
+            "Description": st.column_config.TextColumn("Description", help="Free text field."),
+        },
         key=f"{section_key}_receipts_editor",
     )
 
@@ -959,16 +975,19 @@ def render_database_browser(database_df: pd.DataFrame, token: str, drive_id: str
     with save_col1:
         if st.button("Save checks", key=f"{section_key}_save_checks", use_container_width=True):
             checked_column = "Checked"
+            description_column = "Description"
             updated_checks = edited_display_df[checked_column].fillna(False).astype(bool).tolist()
+            updated_descriptions = edited_display_df[description_column].fillna("").astype(str).tolist()
             updated_df = database_df.copy()
             updated_df.loc[filtered_df.index, "checked"] = updated_checks
+            updated_df.loc[filtered_df.index, "gpt_description"] = updated_descriptions
             try:
                 csv_path = save_database_df(updated_df, token, drive_id)
-                st.success(f"Checks saved to {csv_path}")
+                st.success(f"Changes saved to {csv_path}")
                 st.rerun()
             except Exception as exc:
-                st.error(f"Could not save checks: {exc}")
-                logger.exception("Could not save checked flags")
+                st.error(f"Could not save changes: {exc}")
+                logger.exception("Could not save checked flags or descriptions")
 
     pdf_paths = filtered_df["file_path"].dropna().astype(str).tolist() if "file_path" in filtered_df.columns else []
     current_signature = "||".join(pdf_paths)
@@ -1060,6 +1079,7 @@ def initialize_session_state() -> None:
     st.session_state.setdefault("gcv_bank_name", BANK_OPTIONS[0])
     st.session_state.setdefault("gcv_card_type", "debit")
     st.session_state.setdefault("gcv_card_last4", "")
+    st.session_state.setdefault("gcv_description", "")
 
 
 def clear_processed_results() -> None:
@@ -1078,6 +1098,7 @@ def reset_upload_form() -> None:
     st.session_state.gcv_bank_name = BANK_OPTIONS[0]
     st.session_state.gcv_card_type = "debit"
     st.session_state.gcv_card_last4 = ""
+    st.session_state.gcv_description = ""
 
 
 def resolve_streamlit_token() -> tuple[str | None, bool, str]:
@@ -1167,6 +1188,7 @@ def render_process_page(token: str | None) -> None:
     bank_name = st.selectbox("Bank *", options=BANK_OPTIONS, index=0, key="gcv_bank_name")
     card_type = st.selectbox("Card type *", options=["debit", "credit"], index=0, key="gcv_card_type")
     card_last4 = st.text_input("Card last 4 digits *", max_chars=4, key="gcv_card_last4")
+    description = st.text_area("Description", key="gcv_description", help="Free text applied to all uploaded pages.")
     process_clicked = st.button("Process", type="primary")
 
     if process_clicked:
@@ -1272,6 +1294,7 @@ def render_process_page(token: str | None) -> None:
                             "gpt_merchant_name": str(gpt_json.get("merchant_name") or ""),
                             "gpt_city": str(gpt_json.get("city") or ""),
                             "gpt_province": str(gpt_json.get("province") or ""),
+                            "gpt_description": str(description or "").strip(),
                             "gpt_confidence": _to_float(gpt_json.get("confidence"), 0.0),
                             "company": company_name,
                             "bank": bank_name.strip(),
@@ -1291,6 +1314,7 @@ def render_process_page(token: str | None) -> None:
                             bank=bank_name.strip(),
                             card_type=card_type,
                             card_last4=card_last4,
+                            description=description,
                             gpt_json=gpt_json,
                             notes=notes,
                             pdf_file_name=final_pdf_name,
@@ -1333,6 +1357,7 @@ def render_process_page(token: str | None) -> None:
             "gpt_merchant_name",
             "gpt_city",
             "gpt_province",
+            "gpt_description",
             "gpt_confidence",
             "notes",
             "file_name",
@@ -1352,7 +1377,24 @@ def render_process_page(token: str | None) -> None:
 
     if st.session_state.gcv_processed:
         st.subheader("Summary Preview")
-        st.dataframe(st.session_state.gcv_summary_df, use_container_width=True)
+        preview_df = st.session_state.gcv_summary_df.copy()
+        preview_display_df = _prettify_dataframe_columns(preview_df)
+        edited_preview_df = st.data_editor(
+            preview_display_df,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[column for column in preview_display_df.columns if column != "Description"],
+            column_config={"Description": st.column_config.TextColumn("Description", help="Free text field.")},
+            key="gcv_summary_editor",
+        )
+        if "Description" in edited_preview_df.columns:
+            st.session_state.gcv_summary_df["gpt_description"] = (
+                edited_preview_df["Description"].fillna("").astype(str).tolist()
+            )
+            st.session_state.gcv_excel_bytes = create_excel_bytes(
+                st.session_state.gcv_summary_df,
+                st.session_state.gcv_raw_df,
+            )
         if st.session_state.gcv_results_saved and st.session_state.last_database_csv_path:
             st.caption(f"CSV updated: {st.session_state.last_database_csv_path}")
         elif not st.session_state.gcv_results_saved:
